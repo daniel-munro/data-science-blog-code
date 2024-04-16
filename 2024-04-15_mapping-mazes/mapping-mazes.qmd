@@ -1,0 +1,437 @@
+---
+title: "Mapping mazes from the inside"
+author: "Daniel Munro"
+date: 2024-04-15
+format:
+  html:
+    embed-resources: true
+editor: visual
+execute:
+  echo: false
+---
+
+[\< Home (danmun.ro)](https://danmun.ro)
+
+We have been tasked with mapping and finding routes through multiple tunnel systems. Each one is a "perfect maze", meaning its structure is a tree, and any two locations, including the start and goal, have one non-backtracking route connecting them:
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+library(gganimate)
+
+load_maze <- function(id) {
+    read_tsv(str_glue("mazes/maze_{id}.txt"), col_types = "iiii") |>
+        bind_rows( # Add entrance and exit
+            tribble(
+                ~n1x, ~n1y, ~n2x, ~n2y,
+                   0,    0,    0,   -1,
+                   width - 1,    height - 1,    width - 1,   height,
+            )
+        ) |>
+        mutate(n1y = height - 1 - n1y,
+               n2y = height - 1 - n2y)
+}
+
+draw_maze <- function(maze) {
+    ggplot(maze, aes(x = n1x, y = n1y, xend = n2x, yend = n2y)) +
+        geom_segment(linewidth = 6, lineend = "square", color = "white") +
+        coord_fixed(xlim = c(-0.6, width - 1 + 0.6),
+                    ylim = c(-0.6, height - 1 + 0.6), expand = FALSE) +
+        theme_classic() +
+        theme(
+            axis.line = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            panel.background = element_rect(fill = "black"),
+        ) +
+        xlab(NULL) +
+        ylab(NULL)
+}
+
+turns <- function(x, y) {
+    dirs = c()
+    turns = c()
+    for (i in 1:(length(x) - 1)) {
+        if (y[i + 1] < y[i]) {
+            dirs <- c(dirs, -pi/2)
+        } else if (y[i + 1] > y[i]) {
+            dirs <- c(dirs, pi/2)
+        } else if (x[i + 1] > x[i]) {
+            dirs <- c(dirs, 0)
+        } else {
+            dirs <- c(dirs, -pi)
+        }
+    }
+    dirs <- c(-pi/2, dirs, -pi/2) # Enter and exit the maze
+    for (i in 1:(length(dirs) - 1)) {
+        turn <- dirs[i + 1] - dirs[i]
+        turns <- c(turns, turn)
+    }
+    turns
+}
+
+guess_path_x <- function(turns, moves, direc_start) {
+    x <- 0
+    direc <- direc_start[1]
+    xvals <- c(x)
+    for (i in 1:(length(turns)-1)) {
+        direc <- direc + turns[i]
+        x <- x + moves[i] * cos(direc)
+        xvals <- c(xvals, x)
+    }
+    xvals
+}
+
+guess_path_y <- function(turns, moves, direc_start) {
+    y <- height - 1
+    direc <- direc_start[1]
+    yvals <- c(y)
+    for (i in 1:(length(turns)-1)) {
+        direc <- direc + turns[i]
+        y <- y + moves[i] * sin(direc)
+        yvals <- c(yvals, y)
+    }
+    yvals
+}
+
+#' Get logical vector indicating which nodes are on the direct solution path
+on_direct_path <- function(x, y) {
+    nodes <- str_c(x, "_", y)
+    original <- nodes
+    while (any(duplicated(nodes))) {
+        dup <- nodes[duplicated(nodes)][1]
+        locs <- which(nodes == dup)
+        nodes <- nodes[-c((locs[1]+1):locs[2])]
+    }
+    tibble(node = original) |>
+        mutate(on_direct_path = node %in% nodes & !(duplicated(node))) |>
+        pull(on_direct_path)
+}
+
+colors <- c("#ff7f00", "#377eb8", "#4daf4a", "#984ea3", "#e41a1c", "#fdc11c")
+
+width <- 30
+height <- 20
+
+mazes <- tibble(id = 0:5) |>
+    reframe(load_maze(id), .by = id)
+maze <- filter(mazes, id == 0)
+
+dfs <- crossing(id = 0:5,
+                       search = as.character(0:19)) |>
+    reframe(
+        read_tsv(str_glue("solve_DFS/search_{id}_{search}.txt"), col_types = "ii") |>
+            mutate(step = 1:n()),
+        .by = c(id, search)
+    ) |>
+    mutate(path = str_c(id, "_", search),
+           y = height - 1 - y,
+           xjit = x + runif(n(), -0.25, 0.25),
+           yjit = y + runif(n(), -0.25, 0.25),
+           turn = turns(x, y) + runif(n(), -0.5, 0.5),
+           move = runif(n(), 0.7, 1.3),
+           direc_start = runif(n(), -pi, pi),
+           xguess = guess_path_x(turn, move, direc_start),
+           yguess = guess_path_y(turn, move, direc_start),
+           .by = c(id, search))
+
+bfs <- read_tsv("solve_BFS/search_0_0.txt", col_types = "ii") |>
+    mutate(y = height - 1 - y,
+           xjit = x + runif(n(), -0.25, 0.25),
+           yjit = y + runif(n(), -0.25, 0.25))
+
+heur <- read_tsv("solve_heuristic/search_0_0.txt", col_types = "ii") |>
+    mutate(y = height - 1 - y,
+           xjit = x + runif(n(), -0.25, 0.25),
+           yjit = y + runif(n(), -0.25, 0.25))
+```
+
+```{r}
+draw_maze(maze)
+```
+
+In these dark tunnels, we occupy one maze cell at a time and only know which directions we can move in and whether we've reached the goal. We can record our history along the way.
+
+A natural choice would be depth-first search (DFS). Any time we encounter a fork, choose one direction and keep going. When we hit a dead end, turn around and try the next option. A deterministic version of this is the hand on wall rule, where we touch our right or left hand to the wall and keep walking without losing contact with the wall. Here, we get multiple runs through the maze to try to map it, so we'll choose randomly when we encounter a fork.
+
+```{r}
+n_steps <- dfs |>
+    filter(id == 0) |>
+    summarise(n_steps = max(step),
+              .by = path) |>
+    summarise(min_steps = min(n_steps)) |>
+    pull(min_steps)
+
+p <- tibble(tstep = 2:n_steps) |>
+    reframe(
+        dfs |>
+            filter(id == 0,
+                   step <= tstep),
+        .by = tstep
+    ) |>
+    ggplot(aes(x = xjit, y = yjit, group = search, color = search)) +
+    geom_segment(aes(x = n1x, y = n1y, xend = n2x, yend = n2y, group = NULL, color = NULL),
+                 data = maze, linewidth = 6, lineend = "square", color = "white") +
+    geom_path(linewidth = 2, alpha = 0.5, show.legend = FALSE) +
+    coord_fixed(xlim = c(-0.6, width - 1 + 0.6),
+                ylim = c(-0.6, height - 1 + 0.6), expand = FALSE) +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_rect(fill = "black"),
+    ) +
+    xlab(NULL) +
+    ylab(NULL) +
+    transition_manual(tstep)
+
+animate(p, fps = 20, nframes = n_steps - 1, end_pause = 10)
+```
+
+Why not breadth-first search (BFS)? While DFS can be implemented with a stack of new cells to try, popping the most recently visited cell and checking its neighbors, BFS can be implemented with a queue, checking all visited cells before getting to the neighbors of the current cell. Doesn't it give us the shortest path to the goal? Well, it lets you find shortest path, but you do not follow the shortest path while figuring it out. For someone that has to solve the maze step-by-step, we'd have to cross back and forth a lot. Here's just one path to solve the maze with BFS:
+
+```{r}
+draw_maze(maze) +
+    geom_path(aes(x = xjit, y = yjit, xend = NULL, yend = NULL, color = 1),
+              data = bfs, linewidth = 1, alpha = 0.5, show.legend = FALSE)
+```
+
+What about a heuristic algorithm? We can use a more sophisticated ordering of cells to check using a priority queue, and always check the cell in the queue with the lowest distance to the goal. This does reduce the back-and-forth of BFS, but still isn't as efficient as DFS, and it requires you to know where the goal is:
+
+```{r}
+draw_maze(maze) +
+    geom_path(aes(x = xjit, y = yjit, xend = NULL, yend = NULL, color = 'a'),
+              data = heur, linewidth = 1, alpha = 0.5, show.legend = FALSE)
+```
+
+Perhaps a heuristic component could be added to DFS, where you still pop cells from a stack, but instead of pushing neighbors of a cell to the stack in a random order, order them using a heuristic. But let's suppose we don't know where the goal is until we get there, and DFS with random choices is about as good as we can get.
+
+In any case, because the maze is one tree packed into a rectangle, there's only one non-backtracking path to the goal, so all of these methods find the same solution in the end.
+
+So we set off to map the tunnels using DFS. We traverse them over and over and record the paths as a sequence of turns and walks. Here is what we managed:
+
+```{r}
+p2 <- tibble(tstep = 1:200) |>
+    reframe(
+        dfs |>
+            filter(step <= tstep * 5),
+        .by = tstep
+    ) |>
+    ggplot(aes(x = xguess, y = yguess, group = path, color = path)) +
+    geom_path(linewidth = 1, alpha = 0.3, show.legend = FALSE) +
+    coord_fixed() +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL) +
+    transition_manual(tstep)
+
+animate(p2, fps = 20, nframes = 200, end_pause = 10)
+```
+
+Maze? More like malaise. Actually, it looks pretty cool! To me this pretty well represents the subjective experience of solving a maze from the inside.
+
+But can we get accurate maze maps from this data? First, since we know these are rectangular mazes, we can round our turns to the nearest right angle:
+
+```{r}
+dfs <- dfs |>
+    mutate(turn2 = (round((turn / pi) * 2) / 2) * pi,
+           xguess2 = guess_path_x(turn2, move, direc_start),
+           yguess2 = guess_path_y(turn2, move, direc_start),
+           .by = path)
+
+p3 <- tibble(tstep = 1:200) |>
+    reframe(
+        dfs |>
+            filter(step <= tstep * 5),
+        .by = tstep
+    ) |>
+    ggplot(aes(x = xguess2, y = yguess2, group = path, color = path)) +
+    geom_path(linewidth = 1, alpha = 0.3, show.legend = FALSE) +
+    coord_fixed() +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL) +
+    transition_manual(tstep)
+
+animate(p3, fps = 20, nframes = 200, end_pause = 10)
+```
+
+And since the maze is on a grid, we can round our walk distances to multiples of a fixed value:
+
+```{r}
+dfs <- dfs |>
+    mutate(move2 = round(move),
+           xguess2 = guess_path_x(turn2, move2, direc_start),
+           yguess2 = guess_path_y(turn2, move2, direc_start),
+           .by = path)
+
+p4 <- tibble(tstep = 1:200) |>
+    reframe(
+        dfs |>
+            filter(step <= tstep * 5),
+        .by = tstep
+    ) |>
+    ggplot(aes(x = xguess2, y = yguess2, group = path, color = path)) +
+    geom_path(linewidth = 1, alpha = 0.3, show.legend = FALSE) +
+    coord_fixed() +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL) +
+    transition_manual(tstep)
+
+animate(p4, fps = 20, nframes = 200, end_pause = 10)
+```
+
+And finally, we know we entered in the top left corner of each maze, so we can align them by starting direction:
+
+```{r}
+dfs <- dfs |>
+    mutate(xguess3 = round(guess_path_x(turn2, move2, -pi / 2)),
+           yguess3 = round(guess_path_y(turn2, move2, -pi / 2)),
+           .by = path)
+
+p5 <- tibble(tstep = 1:150) |>
+    reframe(
+        dfs |>
+            filter(step <= tstep * 5),
+        .by = tstep
+    ) |>
+    ggplot(aes(x = xguess3, y = yguess3, group = path, color = path)) +
+    geom_path(linewidth = 1, alpha = 0.5, show.legend = FALSE) +
+    coord_fixed() +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL) +
+    transition_manual(tstep)
+
+animate(p5, fps = 20, nframes = 150)
+```
+
+Looks promising! We know there were multiple different mazes, each of which we mapped multiple times, following a different random path each time. How do we separate these traversals according to which maze we were in?
+
+Each of these traversals contains the direct solution to each maze, if we ignore the backtracks. So we can remove all the backtracks, and what's left are groups of identical solution paths, one group per maze:
+
+```{r}
+direct_paths <- dfs |>
+    select(id, search, path, x = xguess3, y = yguess3) |>
+    mutate(on_path = on_direct_path(x, y),
+           idguess = str_c(str_c(x[on_path], y[on_path], sep = ","), collapse = "_"),
+           .by = path) |>
+    mutate(idguess = as.integer(as.factor(idguess)),
+           xjit = x + runif(n(), -0.2, 0.2),
+           yjit = y + runif(n(), -0.2, 0.2),
+           group = str_c(path, "_", on_path),
+           group = cumsum(lag(group, default = first(group)) != group),
+           path = fct_shuffle(path))
+
+direct_paths |>
+    filter(!on_path) |>
+    ggplot(aes(x = xjit, y = yjit, group = group, color = as.character(idguess), alpha = on_path)) +
+    geom_path(linewidth = 1, show.legend = FALSE) +
+    geom_path(aes(group = path), data = filter(direct_paths, on_path),
+              linewidth = 1, show.legend = FALSE) +
+    coord_fixed() +
+    scale_color_manual(values = colors) +
+    scale_alpha_manual(values = c(0.05, 0.8)) +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL)
+```
+
+Now we can separate the data by maze:
+
+```{r}
+direct_paths |>
+    ggplot(aes(x = xjit, y = yjit, group = path, color = as.character(idguess))) +
+    facet_wrap(~ idguess) +
+    geom_path(linewidth = 1, alpha = 0.5, show.legend = FALSE) +
+    coord_fixed() +
+    scale_color_manual(values = colors) +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.text = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL)
+```
+
+Not only have we found the direct solution to each maze, but we traversed the mazes enough to fully map them! Here's one of them:
+
+```{r}
+maze_guess <- direct_paths |>
+    filter(idguess == 1) |>
+    mutate(xend = lead(x),
+           yend = lead(y),
+           .by = path) |>
+    filter(!is.na(xend),
+           !is.na(yend)) |>
+    mutate(p1 = str_c(x, y, sep = "_"),
+           p2 = str_c(xend, yend, sep = "_")) |>
+    rowwise() |>
+    mutate(edge = str_c(p1, p2, sep = "_"),
+           edge = str_c(sort(c(p1, p2))[1], sort(c(p1, p2))[2], sep = "_")) |>
+    distinct(edge) |>
+    separate(edge, c("n1x", "n1y", "n2x", "n2y"), sep = "_", convert = TRUE) |>
+    bind_rows(
+        tribble(
+            ~n1x, ~n1y, ~n2x, ~n2y,
+            0,    height,    0,   height - 1,
+            width - 1,    0,    width - 1,   -1,
+        )
+    )
+
+direct_paths |>
+    filter(idguess == 1) |>
+    ggplot(aes(x = xjit, y = yjit, group = path, color = as.character(id))) +
+    geom_segment(aes(x = n1x, y = n1y, xend = n2x, yend = n2y, group = NULL, color = NULL),
+                 data = maze_guess, linewidth = 6, lineend = "square", color = "white") +
+    geom_path(linewidth = 1, alpha = 0.5, color = colors[1], show.legend = FALSE) +
+    coord_fixed(xlim = c(-0.6, width - 1 + 0.6),
+                ylim = c(-0.6, height - 1 + 0.6), expand = FALSE) +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_rect(fill = "black"),
+        strip.text = element_blank(),
+    ) +
+    xlab(NULL) +
+    ylab(NULL)
+```
+
+And just like that, we've used data science techniques to recover this intricate structure from that ball of fuzz. Maze-mapping mission complete!
+
+### Acknowledgements
+
+I used Python with the [NetworkX](https://networkx.org/) library to generate and solve the mazes. I used R with [tidyverse](https://www.tidyverse.org/) and [gganimate](https://gganimate.com/) libraries. My code is [here](https://github.com/daniel-munro/data-science-blog-code).
+
+[\< Home (danmun.ro)](https://danmun.ro)
