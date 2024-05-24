@@ -1,0 +1,467 @@
+---
+title: "Rubik's Cube configurations"
+author: "Daniel Munro"
+date: 2024-05-24
+format:
+  html:
+    embed-resources: true
+editor: visual
+execute:
+  echo: false
+---
+
+[\< Home (danmun.ro)](https://danmun.ro)
+
+The Rubik's Cube is a popular puzzle toy invented by Ernő Rubik in 1974. Starting with a 3-by-3 grid of squares on each face, all one color per face, you can twist each face in any order to scramble the colors. To solve it, you have to get it back to its original configuration.
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(gganimate))
+suppressPackageStartupMessages(library(tidygraph))
+suppressPackageStartupMessages(library(ggraph))
+
+colors <- c(
+    "w" = "#fafafa",
+    "g" = "#4daf4a",
+    "r" = "#e41a1c",
+    "b" = "#377eb8",
+    "o" = "#ff7f00",
+    "y" = "#fdc11c"
+)
+
+#     www
+#     w0w
+#     www
+# ggg rrr bbb ooo            012
+# g1g r2r b3b o4o            3 4
+# ggg rrr bbb ooo            567
+#     yyy
+#     y5y
+#     yyy
+
+states <- tibble(color = read_lines("states_shuffle.txt")) |>
+    mutate(state = 0:(n() - 1),
+           color = str_split(color, "")) |>
+    unnest(color) |>
+    mutate(face = rep(0:5, each = 8),
+           cell = rep(0:7, times = 6),
+           .by = state)
+states <- states |>
+    bind_rows(
+        crossing(state = unique(states$state),
+                 face = 0:5) |>
+            mutate(color = c("w", "g", "r", "b", "o", "y")[face + 1],
+                   cell = 8)
+    ) |>
+    arrange(state, face, cell)
+```
+
+```{r}
+plot_cube_flat <- function(state) {
+    state |>
+        mutate(face_row = c(0, 1, 1, 1, 1, 2)[face + 1],
+               face_col = c(1, 0, 1, 2, 3, 1)[face + 1],
+               cell_row = c(0, 0, 0, 1, 1, 2, 2, 2, 1)[cell + 1],
+               cell_col = c(0, 1, 2, 0, 2, 0, 1, 2, 1)[cell + 1],
+               row = 8 - (face_row * 3 + cell_row) + 1,
+               col = face_col * 3 + cell_col + 1) |>
+        ggplot(aes(x = col, y = row, fill = color)) +
+        geom_tile(color = "black", linewidth = 0.5, show.legend = FALSE) +
+        coord_fixed() +
+        scale_fill_manual(values = colors) +
+        theme_classic() +
+        theme(
+            axis.line = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            axis.title = element_blank(),
+        )
+}
+
+data_cube_3d <- function(state) {
+    # Viewed as two hexagons centered on opposite corners. Top faces are horizontal rhombuses.
+    tri_grid_coords <- function(face, cell) {
+        # For each face+cell, x1, y1, x2, y2 for the two triangles it occupies.
+        tri_grid <- list(
+            "0 0" = c(1, 5, 2, 5), "0 1" = c(3, 5, 4, 5), "0 2" = c(5, 5, 6, 5),
+            "0 3" = c(3, 4, 4, 4), "0 8" = c(5, 4, 6, 4), "0 4" = c(7, 4, 8, 4),
+            "0 5" = c(5, 3, 6, 3), "0 6" = c(7, 3, 8, 3), "0 7" = c(9, 3, 10, 3),
+            
+            "1 0" = c(0, 5, 1, 4), "1 1" = c(2, 4, 3, 3), "1 2" = c(4, 3, 5, 2),
+            "1 3" = c(0, 4, 1, 3), "1 8" = c(2, 3, 3, 2), "1 4" = c(4, 2, 5, 1),
+            "1 5" = c(0, 3, 1, 2), "1 6" = c(2, 2, 3, 1), "1 7" = c(4, 1, 5, 0),
+            
+            "2 0" = c(6, 2, 7, 2), "2 1" = c(8, 2, 9, 2), "2 2" = c(10, 2, 11, 2),
+            "2 3" = c(6, 1, 7, 1), "2 8" = c(8, 1, 9, 1), "2 4" = c(10, 1, 11, 1),
+            "2 5" = c(6, 0, 7, 0), "2 6" = c(8, 0, 9, 0), "2 7" = c(10, 0, 11, 0),
+            
+            "3 0" = c(10, 0, 11, 0), "3 1" = c(8, 0, 9, 0), "3 2" = c(6, 0, 7, 0),
+            "3 3" = c(10, 1, 11, 1), "3 8" = c(8, 1, 9, 1), "3 4" = c(6, 1, 7, 1),
+            "3 5" = c(10, 2, 11, 2), "3 6" = c(8, 2, 9, 2), "3 7" = c(6, 2, 7, 2),
+            
+            "4 0" = c(4, 1, 5, 0), "4 1" = c(2, 2, 3, 1), "4 2" = c(0, 3, 1, 2),
+            "4 3" = c(4, 2, 5, 1), "4 8" = c(2, 3, 3, 2), "4 4" = c(0, 4, 1, 3),
+            "4 5" = c(4, 3, 5, 2), "4 6" = c(2, 4, 3, 3), "4 7" = c(0, 5, 1, 4),
+            
+            "5 0" = c(5, 5, 6, 5), "5 1" = c(7, 4, 8, 4), "5 2" = c(9, 3, 10, 3),
+            "5 3" = c(3, 5, 4, 5), "5 8" = c(5, 4, 6, 4), "5 4" = c(7, 3, 8, 3),
+            "5 5" = c(1, 5, 2, 5), "5 6" = c(3, 4, 4, 4), "5 7" = c(5, 3, 6, 3)
+        )
+        coords <- tri_grid[[str_glue("{face} {cell}")]]
+        if (face %in% 0:2) {
+            x <- coords[c(1, 3)]
+            y <- coords[c(2, 4)]
+        } else { # Translate coords for 2nd view
+            x <- coords[c(1, 3)] + 16
+            y <- coords[c(2, 4)] - 4
+        }
+        c(x[1], y[1], x[2], y[2])
+    }
+    cart_coords <- function(x, y) {
+        # Cartesian coordinates for one triangle
+        if (x %% 2 == 0) {
+            x1 <- (x / 2) * (sqrt(3) / 2)
+            y1 <- (x / 4) + y
+            x2 <- x1
+            y2 <- y1 + 1
+            x3 <- x1 + (sqrt(3) / 2)
+            y3 <- y1 + 0.5
+        } else {
+            x1 <- ((x - 1) / 2) * (sqrt(3) / 2)
+            y1 <- ((x - 1) / 4) + y + 1
+            x2 <- x1 + (sqrt(3) / 2)
+            y2 <- y1 + 0.5
+            x3 <- x2
+            y3 <- y1 - 0.5
+        }
+        list(c(x1, y1), c(x2, y2), c(x3, y3))
+    }
+    cell_coords <- function(face, cell) {
+        tri_coords <- tri_grid_coords(face, cell)
+        tri1 <- cart_coords(tri_coords[1], tri_coords[2])
+        tri2 <- cart_coords(tri_coords[3], tri_coords[4])
+        # Merge triangles into a rhombus
+        if (face %in% c(0, 5)) {
+            tibble(x = c(tri1[[1]][1], tri1[[2]][1], tri2[[3]][1], tri1[[3]][1]),
+                   y = c(tri1[[1]][2], tri1[[2]][2], tri2[[3]][2], tri1[[3]][2]))
+        } else if (face %in% c(1, 4)) {
+            tibble(x = c(tri1[[1]][1], tri1[[2]][1], tri1[[3]][1], tri2[[3]][1]),
+                   y = c(tri1[[1]][2], tri1[[2]][2], tri1[[3]][2], tri2[[3]][2]))
+        } else {
+            tibble(x = c(tri1[[1]][1], tri1[[2]][1], tri2[[2]][1], tri1[[3]][1]),
+                   y = c(tri1[[1]][2], tri1[[2]][2], tri2[[2]][2], tri1[[3]][2]))
+        }
+    }
+    state |>
+        mutate(face_cell = str_glue("{face} {cell}")) |>
+        mutate(coords = list(cell_coords(face, cell)),
+               .by = face_cell) |>
+        unnest(coords)
+}
+
+plot_cube_3d <- function(state) {
+    # Viewed as two hexagons centered on opposite corners. Top faces are horizontal rhombuses.
+    data_cube_3d(state) |>
+        ggplot(aes(x = x, y = y, fill = color, group = face_cell)) +
+        geom_polygon(color = "black", linewidth = 0.5, show.legend = FALSE) +
+        coord_fixed() +
+        scale_fill_manual(values = colors) +
+        theme_classic() +
+        theme(
+            axis.line = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            axis.title = element_blank(),
+        )
+}
+
+# animate_cube_3d <- function(states, fps = 5) {
+#     # Viewed as two hexagons centered on opposite corners. Top faces are horizontal rhombuses.
+#     p1 <- states |>
+#         reframe(
+#             data_cube_3d(tibble(face, cell, color)),
+#             .by = state
+#         ) |>
+#         ggplot(aes(x = x, y = y, fill = color, group = face_cell)) +
+#         geom_polygon(color = "black", linewidth = 0.5, show.legend = FALSE) +
+#         coord_fixed() +
+#         scale_fill_manual(values = colors) +
+#         theme_classic() +
+#         theme(
+#             axis.line = element_blank(),
+#             axis.text = element_blank(),
+#             axis.ticks = element_blank(),
+#             axis.title = element_blank(),
+#         ) +
+#         transition_manual(state)
+#     
+#     animate(p1, nframes = n_distinct(states$state), fps = fps)
+# }
+```
+
+Here is the solved cube, flattened:
+
+```{r}
+states |>
+    filter(state == 0) |>
+    plot_cube_flat()
+```
+
+Here it is in a more intuitive 3D perspective, showing two opposite corners of the same cube so that every square is visible:
+
+```{r}
+states |>
+    filter(state == 0) |>
+    plot_cube_3d()
+```
+
+One clockwise twist of the yellow face:
+
+```{r}
+states |>
+    filter(state == 1) |>
+    plot_cube_3d()
+```
+
+And a second, clockwise twist of the blue face:
+
+```{r}
+states |>
+    filter(state == 2) |>
+    plot_cube_3d()
+```
+
+And so on until it's scrambled:
+
+```{r}
+states |>
+    filter(state == 50) |>
+    plot_cube_3d()
+```
+
+## Unsolving the cube
+
+How many twists does it take to scramble a solved cube? We can simulate this process many times, measure properties of the configurations along the way, and see when those properties stop changing. Here are the results of 1000 trials.
+
+```{r}
+trials <- read_tsv("states_shuffle_1000.txt", col_types = "ic") |>
+    rename(color = state) |>
+    mutate(state = 0:(n() - 1),
+           color = str_split(color, ""),
+           .by = trial) |>
+    unnest(color) |>
+    mutate(face = rep(0:5, each = 8),
+           cell = rep(0:7, times = 6),
+           .by = c(trial, state))
+```
+
+First, count how many of the eight surrounding squares match the color of the center squares:
+
+```{r}
+trials |>
+    mutate(face = names(colors)[face + 1]) |>
+    summarise(n_match = sum(color == face),
+              frac_match = mean(color == face),
+              .by = c(trial, state, face)) |>
+    summarise(mean_frac = mean(frac_match),
+              sd_frac = sd(frac_match),
+              .by = state) |>
+    ggplot(aes(x = state, y = mean_frac, ymin = mean_frac - sd_frac, ymax = mean_frac + sd_frac)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 1/6, color = "red", linewidth = 0.75) +
+    expand_limits(y = c(0, 1.02)) +
+    scale_y_continuous(expand = c(0, 0)) +
+    theme_classic() +
+    xlab("Number of random twists") +
+    ylab("Fraction of surrounding squares matching center color") +
+    labs(caption = "Red line is y = 1/6, vertical lines are standard deviations")
+```
+
+At first, 100% of the surrounding squares on each face match the center. After one twist, four faces have only five matches and the other two faces are unchanged (as you can see in the single-twist cube shown earlier), resulting in $4/6 * 5/8 + 2/6 * 8/8 = 0.75$. After that it gets more complex, but since each surrounding square can be one of six colors, this should converge to an average of $1/6 = 0.1666...$. This seems to happen around the 30th twist.
+
+For a more detailed test, we can count how many of each color appear on each other color's face. Even after an average of 5/6 of a color's movable squares have migrated from their original face, perhaps they are more likely to be on adjacent faces than on the opposite face.
+
+```{r fig.width = 6, fig.height = 12}
+color_order <- c("w", "g", "r", "y", "b", "o")
+
+tmp <- trials |>
+    mutate(face = names(colors)[face + 1]) |>
+    count(trial, state, face, color) |>
+    complete(trial, state, face, color, fill = list(n = 0)) |>
+    filter(state < 40) |>
+    summarise(mean_frac = mean(n) / 8,
+              .by = c(state, face, color))
+tmp |>
+    # mutate(face = factor(color_names[face], levels = color_names),
+    #        color = factor(color_names[color], levels = color_names)) |>
+    mutate(face = factor(face, levels = color_order),
+           color = factor(color, levels = color_order)) |>
+    ggplot(aes(x = face, y = color, fill = mean_frac)) +
+    facet_wrap(~ state, ncol = 5) +
+    geom_tile() +
+    coord_fixed() +
+    # scale_fill_viridis_c()
+    scale_fill_gradient(low = "white", high = "black") +
+    theme_minimal() +
+    theme(
+        panel.grid = element_blank(),
+        legend.position = "top",
+    ) +
+    xlab("Center color") +
+    ylab("Color of movable square") +
+    labs(fill = "Mean fraction")
+```
+
+At first, all surrounding squares match the center color. After one twist, they can be on one of the four adjacent faces, but not the opposite one. The fractions steadily converge, and by around the 30th twist, each color of movable square is about equally likely to be on any face.
+
+There are two types of movable square: edge and corner. Do they get shuffled at the same rate?
+
+```{r fig.width = 6, fig.height = 24}
+tmp2 <- trials |>
+    mutate(face = names(colors)[face + 1],
+           type = if_else(cell %in% c(0, 2, 5, 7), "corner", "edge")) |>
+    count(trial, state, face, type, color) |>
+    complete(trial, state, face, type, color, fill = list(n = 0)) |>
+    filter(state <= 30) |>
+    summarise(mean_frac = mean(n) / 4,
+              .by = c(state, face, type, color))
+tmp2 |>
+    # mutate(face = factor(color_names[face], levels = color_names),
+    #        color = factor(color_names[color], levels = color_names)) |>
+    mutate(face = factor(face, levels = color_order),
+           color = factor(color, levels = color_order)) |>
+    ggplot(aes(x = face, y = color, fill = mean_frac)) +
+    facet_grid(rows = vars(state), cols = vars(type)) +
+    geom_tile() +
+    coord_fixed() +
+    # scale_fill_viridis_c()
+    scale_fill_gradient(low = "white", high = "black") +
+    theme_minimal() +
+    theme(
+        panel.grid = element_blank(),
+        legend.position = "top",
+    ) +
+    xlab("Center color") +
+    ylab("Color of movable square") +
+    labs(fill = "Mean fraction")
+```
+
+Corner squares actually get shuffled faster than edge squares. This is because, while there are 24 of each, each twist moves eight corner squares ($1/3$ of them), but only four edge squares ($1/6$ of them), to a new face.
+
+## Solving the cube
+
+If we record the result of a random sequence of twists, we can solve the cube from any of those configurations by reversing the twists.
+
+```{r}
+tmp <- bind_rows(
+    states |>
+        filter(state <= 20) |>
+        mutate(direction = "Forward"),
+    states |>
+        filter(state < 20) |>
+        mutate(state = 2 * 20 - state,
+               direction = "Reversed")
+)
+
+# Viewed as two hexagons centered on opposite corners. Top faces are horizontal rhombuses.
+p1 <- tmp |>
+    reframe(
+        data_cube_3d(tibble(face, cell, color)),
+        .by = state
+    ) |>
+    ggplot(aes(x = x, y = y, fill = color, group = face_cell)) +
+    geom_polygon(color = "black", linewidth = 0.5, show.legend = FALSE) +
+    geom_text(aes(label = direction, x = NULL, y = NULL, fill = NULL, group = NULL),
+              data = distinct(tmp, state, direction),
+              x = 6, y = 7, size = 4) +
+    coord_fixed() +
+    scale_fill_manual(values = colors) +
+    theme_classic() +
+    theme(
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+    ) +
+    transition_manual(state)
+
+animate(p1, nframes = n_distinct(tmp$state), fps = 4)
+# animate_cube_3d(tmp, fps = 4) +
+```
+
+Can we build a general solver that gives a sequence of instructions for any starting configuration? We could do something like the above sequence but more methodically. Starting with the solved cube, try every possible twist sequence, keeping track of which move produced each encountered configuration. Then, reverse each path to get the sequence back to the original solved cube.
+
+Specifically, we can use this algorithm:
+
+-   Initialize an empty directed graph or hash table to store the solution tree
+
+-   Start a queue with the solved configuration
+
+-   While the queue is not empty:
+
+    -   Take configuration $C$ from queue
+
+    -   For each state $D$ resulting from a single twist $T$ from $C$:
+
+        -   If $D$ has not been seen before:
+
+            -   Add an edge/entry to the solution tree pointing from $D$ to $C$, and include the move $T$ with direction reversed
+
+            -   Add $D$ to the queue
+
+This results in a tree with every reachable configuration. To solve any Rubik's Cube in the fewest steps, look up the state and follow the tree up to the root, the solved configuration.
+
+Here is a diagram for any configuration that requires only three moves to solve, starting on the outside and following the moves to the center:
+
+```{r}
+face_names <- c(
+    "-1" = NA,
+    "0" = "white",
+    "1" = "green",
+    "2" = "red",
+    "3" = "blue",
+    "4" = "orange",
+    "5" = "yellow"
+)
+
+solver <- read_tsv("solver.txt", col_types = "ciiic") |>
+    mutate(face = face_names[as.character(face)],
+           dir = c("-1" = "CW", "1" = "ACW", "0" = NA)[as.character(dir)],
+           move = str_glue("{face} {dir}"))
+
+tmp <- solver |>
+    filter(level <= 3)
+tbl_graph(nodes = distinct(tmp, state, level),
+          # Reverse edge directions so solved state is on top
+          edges = tmp |> filter(level > 0) |> select(result, state, move),
+          node_key = "state") |>
+    ggraph(layout = "dendrogram", circular = TRUE) +
+    geom_edge_link(aes(label = move), check_overlap = TRUE, linewidth = 0.2, label_size = 3, color = "gray") +
+    geom_node_point(aes(color = as.character(level)), size = 1) +
+    theme_graph() +
+    theme(plot.margin = margin(0, 0, 0, 0, "pt")) +
+    coord_fixed() +
+    scale_color_viridis_d(direction = -1) +
+    labs(color = "Moves to solve", caption = "CW = clockwise, ACW = anti-clockwise")
+```
+
+You can twist the solved cube 12 different ways (six faces, each in two directions), and each of those configurations can lead to 12 more configurations with another twist. Some of these will have been seen before and ignored, but we still see approximately exponential growth in configurations with each increment in twists-to-solve distance:
+
+```{r fig.width=3, fig.height=3}
+solver |>
+    filter(level > 0) |>
+    ggplot(aes(x = level)) +
+    geom_bar() +
+    scale_y_log10() +
+    theme_classic() +
+    xlab("Moves to solve") +
+    ylab("Configurations")
+```
+
+Eventually this will taper off and stop once every potentially new configuration has been seen before. But it turns out there are around 43 quintillion reachable configurations, so in practice we can't build a complete solver with this algorithm. That's why real solving strategies generally involve more targeted algorithms that solve different parts of the cube step by step. There are some interesting strategies and optimal solution proofs out there that are worth checking out. There's a lot of math packed into this one cube!
+
+### Acknowledgements
+
+I used Python to simulate Rubik's Cubes. I used R with [tidyverse](https://www.tidyverse.org/), [gganimate](https://gganimate.com/), [tidygraph](https://tidygraph.data-imaginist.com/), and [ggraph](https://ggraph.data-imaginist.com/) libraries for visualizations. My code is [here](https://github.com/daniel-munro/data-science-blog-code).
+
+[\< Home (danmun.ro)](https://danmun.ro)
