@@ -1,0 +1,136 @@
+---
+title: "Heat-scatter plots"
+author: "Daniel Munro"
+date: 2024-08-03
+format:
+  html:
+    embed-resources: true
+editor: visual
+execute:
+  echo: false
+---
+
+[\< Home (danmun.ro)](https://danmun.ro)
+
+I will introduce a type of plot that I don't recall seeing before, but I think would be useful. It is a scatter plot in which the points are colored by the number of other points they overlap. This simple coloring scheme turns out to be surprisingly versatile.
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(spatstat.geom))
+
+#' Get number of points overlapping each point. Width and height define the plot window that
+#' will contain all points, and must be in the same units as radius. x and y coordinates will
+#' be tranformed into these units to determine overlaps.
+n_overlap <- function(x, y, radius, width, height) {
+    n_overlap_get_counts <- function(x, y, radius) {
+        # x, y, and radius must all be in the same visually scaled units
+        pp <- ppp(x, y, window = owin(range(x), range(y)))
+        close_pairs <- closepairs(pp, radius * 2)
+        counts <- table(close_pairs$i)
+        all_counts <- integer(npoints(pp))
+        all_counts[as.integer(names(counts))] <- as.integer(counts)
+        all_counts
+    }
+    xviz <- width * (x - range(x)[1]) / (range(x)[2] - range(x)[1])
+    yviz <- height * (y - range(y)[1]) / (range(y)[2] - range(y)[1])
+    n_overlap_get_counts(xviz, yviz, radius)
+}
+```
+
+```{r}
+df <- tibble(x = c(runif(100, 0, 10), c(seq(2, 6, length.out = 81) + rnorm(81, 0, 0.2))),
+             y = c(runif(100, 0, 30), c(seq(2, 4, length.out = 81)^2 + rnorm(81, 0, 0.2))))
+df |>
+    mutate(overlap = n_overlap(x, y, 1, 120, 80)) |> # |> as.factor()) |>
+    ggplot(aes(x = x, y = y, color = overlap)) +
+    geom_point(size = 2) +
+    scale_color_viridis_c() +
+    theme_classic()
+```
+
+With very dense plots, it serves a similar function as a heatmap-colored density plot, but unlike continuous or binned density plots, it still shows the actual data points:
+
+```{r}
+df2 <- tibble(x = rnorm(20000, 50, 12),
+              y = 3 * (x + rnorm(10000, 0, 8))) |>
+    filter(x > 0, x < 100, y > 0, y < 300)
+df2 |>
+    mutate(overlap = n_overlap(x, y, 1, 150, 100)) |>
+    ggplot(aes(x = x, y = y, color = overlap)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_classic()
+```
+
+Opacity is often used to achieve this effect, but then you can't use colors to help distinguish density levels, and even after adjusting opacity levels you can end up with oversaturation and/or points that are difficult to see and may not print well:
+
+```{r}
+df2 |>
+    ggplot(aes(x = x, y = y)) +
+    geom_point(alpha = 0.07) +
+    theme_classic()
+```
+
+The heat-scatter method can also be useful with sparse plots to highlight overlaps that would otherwise be difficult to notice:
+
+```{r}
+df3 <- tibble(x = c(2.5, 2.51, runif(20, 0, 10)),
+              y = c(80, 80.1, runif(20, 0, 100)))
+df3 |>
+    mutate(overlap = n_overlap(x, y, 1, 150, 100) |> as.factor()) |>
+    ggplot(aes(x = x, y = y, color = overlap)) +
+    geom_point(size = 2) +
+    theme_classic()
+```
+
+For plots with intermediate sparseness, it helps you identify clusters:
+
+```{r}
+df4 <- tibble(x = c(rnorm(2000, 10, 4), rnorm(2000, 16, 4), rnorm(2000, 26, 4)),
+              y = c(rnorm(2000, 10, 4), rnorm(2000, 20, 4), rnorm(2000, 8, 4))) |>
+    filter(x > 0, x < 36, y > 0, y < 30)
+df4 |>
+    mutate(overlap = n_overlap(x, y, 1, 150, 100)) |>
+    ggplot(aes(x = x, y = y, color = overlap)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_classic()
+```
+
+Considerations:
+
+-   This prevents the use of color to represent another property of the data.
+
+-   It can be difficult to implement this in a way that is compatible with plotting libraries while still automatically determining number of overlaps. For example, the number of overlaps is dependent on the size of the plot window, which might not be specified at the time the plot object is being created.
+
+You can try the R function I used to count overlaps:
+
+```{r echo=TRUE}
+library(spatstat.geom)
+
+#' Get number of points overlapping each point. Width and height define the plot window that
+#' will contain all points, and must be in the same units as radius. x and y coordinates will
+#' be tranformed into these units to determine overlaps.
+n_overlap <- function(x, y, radius, width, height) {
+    n_overlap_get_counts <- function(x, y, radius) {
+        # x, y, and radius must all be in the same visually scaled units
+        pp <- ppp(x, y, window = owin(range(x), range(y)))
+        close_pairs <- closepairs(pp, radius * 2)
+        counts <- table(close_pairs$i)
+        all_counts <- integer(npoints(pp))
+        all_counts[as.integer(names(counts))] <- as.integer(counts)
+        all_counts
+    }
+    xviz <- width * (x - range(x)[1]) / (range(x)[2] - range(x)[1])
+    yviz <- height * (y - range(y)[1]) / (range(y)[2] - range(y)[1])
+    n_overlap_get_counts(xviz, yviz, radius)
+}
+```
+
+This uses the `spatstat` library to efficiently identify points that are close enough to overlap. Otherwise, comparing all pairs of points would have O(n^2^) time complexity and be slow when there are many points. You may have to guess the `width` and `height` of the plot window and adjust until it looks right.
+
+### Acknowledgements
+
+I used R with the [tidyverse](https://www.tidyverse.org/) and [spatstat](https://spatstat.org/) libraries for data generation and visualizations. My code is [here](https://github.com/daniel-munro/data-science-blog-code).
+
+[\< Home (danmun.ro)](https://danmun.ro)
